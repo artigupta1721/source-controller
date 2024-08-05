@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -64,6 +65,28 @@ type BlobClient struct {
 	*azblob.Client
 }
 
+// Option configures the BlobClient.
+type Option func(*options)
+
+// WithSecret sets the Secret to use for the BlobClient.
+func WithSecret(secret *corev1.Secret) Option {
+	return func(o *options) {
+		o.secret = secret
+	}
+}
+
+// WithProxyURL sets the proxy URL to use for the BlobClient.
+func WithProxyURL(proxyURL *url.URL) Option {
+	return func(o *options) {
+		o.proxyURL = proxyURL
+	}
+}
+
+type options struct {
+	secret   *corev1.Secret
+	proxyURL *url.URL
+}
+
 // NewClient creates a new Azure Blob storage client.
 // The credential config on the client is set based on the data from the
 // Bucket and Secret. It detects credentials in the Secret in the following
@@ -87,7 +110,25 @@ type BlobClient struct {
 //
 // If no credentials are found, and the azidentity.ChainedTokenCredential can
 // not be established. A simple client without credentials is returned.
-func NewClient(obj *sourcev1.Bucket, secret *corev1.Secret) (c *BlobClient, err error) {
+func NewClient(obj *sourcev1.Bucket, opts ...Option) (c *BlobClient, err error) {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	secret := o.secret
+	proxyURL := o.proxyURL
+
+	var clientOpts *azblob.ClientOptions
+	if proxyURL != nil {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = http.ProxyURL(proxyURL)
+		clientOpts = &azblob.ClientOptions{
+			ClientOptions: azcore.ClientOptions{
+				Transport: &http.Client{Transport: transport},
+			},
+		}
+	}
+
 	c = &BlobClient{}
 
 	var token azcore.TokenCredential
@@ -99,7 +140,7 @@ func NewClient(obj *sourcev1.Bucket, secret *corev1.Secret) (c *BlobClient, err 
 			return
 		}
 		if token != nil {
-			c.Client, err = azblob.NewClient(obj.Spec.Endpoint, token, nil)
+			c.Client, err = azblob.NewClient(obj.Spec.Endpoint, token, clientOpts)
 			return
 		}
 
@@ -109,7 +150,7 @@ func NewClient(obj *sourcev1.Bucket, secret *corev1.Secret) (c *BlobClient, err 
 			return
 		}
 		if cred != nil {
-			c.Client, err = azblob.NewClientWithSharedKeyCredential(obj.Spec.Endpoint, cred, &azblob.ClientOptions{})
+			c.Client, err = azblob.NewClientWithSharedKeyCredential(obj.Spec.Endpoint, cred, clientOpts)
 			return
 		}
 
@@ -118,7 +159,7 @@ func NewClient(obj *sourcev1.Bucket, secret *corev1.Secret) (c *BlobClient, err 
 			return
 		}
 
-		c.Client, err = azblob.NewClientWithNoCredential(fullPath, &azblob.ClientOptions{})
+		c.Client, err = azblob.NewClientWithNoCredential(fullPath, clientOpts)
 		return
 	}
 
@@ -131,12 +172,12 @@ func NewClient(obj *sourcev1.Bucket, secret *corev1.Secret) (c *BlobClient, err 
 		return nil, err
 	}
 	if token != nil {
-		c.Client, err = azblob.NewClient(obj.Spec.Endpoint, token, nil)
+		c.Client, err = azblob.NewClient(obj.Spec.Endpoint, token, clientOpts)
 		return
 	}
 
 	// Fallback to simple client.
-	c.Client, err = azblob.NewClientWithNoCredential(obj.Spec.Endpoint, nil)
+	c.Client, err = azblob.NewClientWithNoCredential(obj.Spec.Endpoint, clientOpts)
 	return
 }
 
